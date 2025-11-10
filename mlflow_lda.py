@@ -53,7 +53,7 @@ preproc = ColumnTransformer(
 )
 
 # Defina el servidor para llevar el registro de modelos y artefactos
-mlflow.set_tracking_uri('http://localhost:5000')
+#mlflow.set_tracking_uri('http://localhost:5000')
 # Registre el experimento
 experiment = mlflow.set_experiment("sklearn-compensado-lda")
 
