@@ -1,272 +1,249 @@
-import dash
-from dash import dcc
-from dash import html
-from dash.dependencies import Input, Output
-import plotly.graph_objs as go
+from dash import Dash, dcc, html, Output, Input
+import plotly.express as px
+import pandas as pd
 import numpy as np
-import pandas as pd
-import datetime as dt
-import pandas as pd
-from pathlib import Path
+import joblib
 
+# =========================
+# 1) CARGA Y PREPARACIÓN
+# =========================
+df = joblib.load("compensaciones.pkl")
 
-app = dash.Dash(
-    __name__,
-    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+required = {"NIU", "PERIODO", "COMPENSADO", "LATITUD", "LONGITUD"}
+missing = list(required - set(df.columns))
+if missing:
+    raise ValueError(f"Faltan columnas obligatorias: {missing}")
+
+df = df.copy()
+df["PERIODO_STR"] = df["PERIODO"].astype(str).str.slice(0, 7)  # YYYY-MM
+df["COMPENSADO"] = df["COMPENSADO"].astype(int)
+
+has_diug = "DIUG" in df.columns
+has_consumo = "CONSUMO_MES" in df.columns
+
+# KPI DIUG global
+diug_prom_global = float(df["DIUG"].mean()) if has_diug and df["DIUG"].notna().any() else None
+
+# =========================
+# 2) SIMULACIÓN DE MODELO
+# =========================
+np.random.seed(42)
+df["PROB_PRED"] = (
+    df["COMPENSADO"] * np.random.uniform(0.55, 0.95, size=len(df))
+    + (1 - df["COMPENSADO"]) * np.random.uniform(0.05, 0.45, size=len(df))
 )
-app.title = "Dashboard energia"
+AUC_SIMULADO = 0.67
 
+# =========================
+# 3) FUNCIONES AUXILIARES
+# =========================
+def make_df_mes(comp_sel, d):
+    if comp_sel != "all":
+        d = d[d["COMP_PLOT"] == int(comp_sel)]
+    return (
+        d.groupby("PERIODO_STR", as_index=False)
+        .size()
+        .rename(columns={"size": "conteo"})
+        .sort_values("PERIODO_STR")
+    )
+
+# =========================
+# 4) DASH APP
+# =========================
+app = Dash(__name__)
 server = app.server
-app.config.suppress_callback_exceptions = True
 
+PRIMARY = "#1e4aa8"
+CARD = {"border": "1px solid #e5e7eb", "borderRadius": "12px", "background": "#fff",
+        "padding": "14px", "boxShadow": "0 1px 2px rgba(16,24,40,0.04)"}
+KPI_CARD = {"backgroundColor": PRIMARY, "color": "white", "borderRadius": "12px",
+            "padding": "16px", "boxShadow": "0 2px 10px rgba(0,0,0,0.08)",
+            "display": "flex", "flexDirection": "column", "gap": "6px", "height": "100%"}
+KPI_LABEL = {"fontSize": "13px", "opacity": 0.95}
+KPI_VALUE = {"fontSize": "28px", "fontWeight": "800", "lineHeight": "1"}
+WRAP = {"display": "grid", "gridTemplateColumns": "300px 1fr", "gap": "16px", "alignItems": "start"}
+HEADER = {"background": PRIMARY, "color": "white", "padding": "20px", "borderRadius": "14px",
+          "marginBottom": "14px", "boxShadow": "0 4px 8px rgba(2,6,23,0.15)"}
 
-# Load data from csv
+periodos = sorted(df["PERIODO_STR"].unique().tolist())
+periodo_options = [{"label": "Todos", "value": "all"}] + [{"label": p, "value": p} for p in periodos]
 
-CSV_PATH = Path(__file__).parent / "datos_energia.csv"
-
-def load_data():
-    df = pd.read_csv(CSV_PATH)
-
-    # Cambia 'fecha' por el nombre real si es distinto (p.ej. 'date')
-    fecha_col = 'time'
-
-    df[fecha_col] = pd.to_datetime(df[fecha_col], errors='coerce')
-    df = df.set_index(fecha_col).sort_index()
-    df = df[~df.index.isna()]
-
-    # Validación mínima de columnas esperadas (ajusta si tus nombres difieren)
-    requeridas = [
-        "AT_load_actual_entsoe_transparency",
-        "forecast",
-        "Upper bound",
-        "Lower bound",
-    ]
-    faltantes = [c for c in requeridas if c not in df.columns]
-    if faltantes:
-        raise ValueError(f"Faltan columnas en el CSV: {faltantes}")
-
-    return df
-
-if __name__ == "__main__":
-    # si tu app Dash está en la variable 'app'
-    # from dash_app import app  # (ejemplo si estuviera en otro módulo)
-    # app.run_server(host="0.0.0.0", port=8050, debug=True)
-    pass 
-    
-#cargar
-data = load_data()
-
-# Graficar serie
-def plot_series(data, initial_date, proy):
-    data_plot = data.loc[initial_date:]
-    data_plot = data_plot[:-(120-proy)]
-    fig = go.Figure([
-        go.Scatter(
-            name='Demanda energética',
-            x=data_plot.index,
-            y=data_plot['AT_load_actual_entsoe_transparency'],
-            mode='lines',
-            line=dict(color="#188463"),
-        ),
-        go.Scatter(
-            name='Proyección',
-            x=data_plot.index,
-            y=data_plot['forecast'],
-            mode='lines',
-            line=dict(color="#bbffeb",),
-        ),
-        go.Scatter(
-            name='Upper Bound',
-            x=data_plot.index,
-            y=data_plot['Upper bound'],
-            mode='lines',
-            marker=dict(color="#444"),
-            line=dict(width=0),
-            showlegend=False
-        ),
-        go.Scatter(
-            name='Lower Bound',
-            x=data_plot.index,
-            y=data_plot['Lower bound'],
-            marker=dict(color="#444"),
-            line=dict(width=0),
-            mode='lines',
-            fillcolor="rgba(242, 255, 251, 0.3)",
-            fill='tonexty',
-            showlegend=False
-        )
-    ])
-
-    fig.update_layout(
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        yaxis_title='Demanda total [MW]',
-        #title='Continuous, variable value error bars',
-        hovermode="x"
-    )
-    #fig = px.line(data2, x='local_timestamp', y="Demanda total [MW]", markers=True, labels={"local_timestamp": "Fecha"})
-    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color="#2cfec1")
-    fig.update_xaxes(showgrid=True, gridwidth=0.25, gridcolor='#7C7C7C')
-    fig.update_yaxes(showgrid=True, gridwidth=0.25, gridcolor='#7C7C7C')
-    #fig.update_traces(line_color='#2cfec1')
-
-    return fig
-
-
-
-def description_card():
-    """
-    :return: A Div containing dashboard title & descriptions.
-    """
-    return html.Div(
-        id="description-card",
-        children=[
-            #html.H5("Proyecto 1"),
-            html.H3("Pronóstico de producción energética"),
-            html.Div(
-                id="intro",
-                children="Esta herramienta contiene información sobre la demanda energética total en Austria cada hora según lo públicado en ENTSO-E Data Portal. Adicionalmente, permite realizar pronósticos hasta 5 dias en el futuro."
-            ),
-        ],
-    )
-
-
-def generate_control_card():
-    """
-    :return: A Div containing controls for graphs.
-    """
-    return html.Div(
-        id="control-card",
-        children=[
-
-            # Fecha inicial
-            html.P("Seleccionar fecha y hora inicial:"),
-
-            html.Div(
-                id="componentes-fecha-inicial",
-                children=[
-                    html.Div(
-                        id="componente-fecha",
-                        children=[
-                            dcc.DatePickerSingle(
-                                id='datepicker-inicial',
-                                min_date_allowed=min(data.index.date),
-                                max_date_allowed=max(data.index.date),
-                                initial_visible_month=min(data.index.date),
-                                date=max(data.index.date)-dt.timedelta(days=7)
-                            )
-                        ],
-                        style=dict(width='30%')
-                    ),
-                    
-                    html.P(" ",style=dict(width='5%', textAlign='center')),
-                    
-                    html.Div(
-                        id="componente-hora",
-                        children=[
-                            dcc.Dropdown(
-                                id="dropdown-hora-inicial-hora",
-                                options=[{"label": i, "value": i} for i in np.arange(0,25)],
-                                value=pd.to_datetime(max(data.index)-dt.timedelta(days=7)).hour,
-                                # style=dict(width='50%', display="inline-block")
-                            )
-                        ],
-                        style=dict(width='20%')
-                    ),
-                ],
-                style=dict(display='flex')
-            ),
-
-            html.Br(),
-
-            # Slider proyección
-            html.Div(
-                id="campo-slider",
-                children=[
-                    html.P("Ingrese horas a proyectar:"),
-                    dcc.Slider(
-                        id="slider-proyeccion",
-                        min=0,
-                        max=119,
-                        step=1,
-                        value=0,
-                        marks=None,
-                        tooltip={"placement": "bottom", "always_visible": True},
-                    )
-                ]
-            )     
-     
-        ]
-    )
-
-
+# =========================
+# 5) LAYOUT
+# =========================
 app.layout = html.Div(
-    id="app-container",
+    style={"fontFamily": "Inter, Arial, sans-serif", "padding": "16px", "background": "#f6f7fb"},
     children=[
-        
-        # Left column
-        html.Div(
-            id="left-column",
-            className="four columns",
-            children=[description_card(), generate_control_card()]
-            + [
-                html.Div(
-                    ["initial child"], id="output-clientside", style={"display": "none"}
-                )
-            ],
-        ),
-        
-        # Right column
-        html.Div(
-            id="right-column",
-            className="eight columns",
-            children=[
+        html.Div(style=HEADER, children=[
+            html.H1("Predicción y Proyección de Compensaciones", style={"margin": 0, "fontWeight": 800}),
+            html.Div("Tablero operativo para monitorear el conteo de casos compensados, su distribución geográfica, "
+    "e integra indicadores clave para continuidad del servicio eléctrico de consumo clave dentro del proceso. "
+    "Integra históricos por período y permite filtrar por estado de compensación para priorizar acciones y focalización.",
+    style={"opacity": .95, "marginTop": "6px"})
+        ]),
 
+        html.Div(style=WRAP, children=[
+            # ----- Sidebar -----
+            html.Div(style=CARD, children=[
+                html.H4("Filtros", style={"marginTop": 0, "marginBottom": "10px"}),
 
-                # Grafica de la serie de tiempo
-                html.Div(
-                    id="model_graph",
-                    children=[
-                        html.B("Demanda energética total en Austria [MW]"),
-                        html.Hr(),
-                        dcc.Graph(
-                            id="plot_series",  
-                        )
+                html.Label("Periodo (YYYY-MM)", style={"fontWeight": 600}),
+                dcc.Dropdown(id="filtro_periodo", options=periodo_options, value="all", clearable=False),
+
+                html.Label("Fuente de estado", style={"fontWeight": 600, "marginTop": "12px"}),
+                dcc.RadioItems(
+                    id="modo_comp",
+                    options=[
+                        {"label": "Etiqueta real", "value": "real"},
+                        {"label": "Predicción (modelo)", "value": "pred"}
                     ],
+                    value="real",
+                    labelStyle={"display": "block", "marginBottom": "6px"},
+                    inputStyle={"marginRight": "6px"}
                 ),
 
-            
-            ],
-        ),
-    ],
+                html.Label("Umbral (solo predicción)", style={"fontWeight": 600, "marginTop": "8px"}),
+                dcc.Slider(id="umbral", min=0, max=1, step=0.01, value=0.5,
+                           marks={0:"0",0.25:"0.25",0.5:"0.5",0.75:"0.75",1:"1"},
+                           tooltip={"placement":"bottom"}),
+
+                html.Hr(),
+                html.Label("Compensado", style={"fontWeight": 600}),
+                dcc.RadioItems(id="filtro_comp",
+                               options=[{"label": "Todos", "value": "all"},
+                                        {"label": "No (0)", "value": 0},
+                                        {"label": "Sí (1)", "value": 1}],
+                               value="all",
+                               labelStyle={"display": "block"},
+                               inputStyle={"marginRight": "6px"}),
+
+                html.Hr(),
+
+                html.Label("Indicador DIUG (promedio global)", style={"fontWeight": 600}),
+                html.Div(
+                    style={
+                        **CARD,
+                        "background": PRIMARY,
+                        "color": "white",
+                        "textAlign": "center",
+                        "padding": "16px",
+                        "border": "0",
+                        "boxShadow": "inset 0 0 0 1px rgba(255,255,255,.08)"
+                    },
+                    children=[
+                        html.Div("DIUG promedio", style={"fontSize": "14px", "opacity": 0.9}),
+                        html.Div(
+                            f"{diug_prom_global:.2f}" if diug_prom_global is not None else "N/D",
+                            style={"fontSize": "36px", "fontWeight": 800, "lineHeight": "1.2"}
+                        ),
+                        html.Div("KWH", style={"fontSize": "12px", "opacity": 0.85, "marginTop": "4px"})
+                    ]
+                ),
+            ]),
+
+            # ----- Contenido -----
+            html.Div(children=[
+                # KPIs
+                html.Div(
+                    style={"display": "grid", "gridTemplateColumns": "1fr 1fr 1fr 1fr", "gap": "16px", "marginBottom": "16px"},
+                    children=[
+                        html.Div(style=KPI_CARD, children=[html.Div("Total registros", style=KPI_LABEL),
+                                                           html.Div(f"{len(df):,}".replace(",", "."), style=KPI_VALUE)]),
+                        html.Div(style=KPI_CARD, children=[html.Div("Períodos", style=KPI_LABEL),
+                                                           html.Div(f"{len(periodos)}", style=KPI_VALUE)]),
+                        html.Div(style=KPI_CARD, children=[html.Div("Compensados (1)", style=KPI_LABEL),
+                                                           html.Div(f"{int((df['COMPENSADO']==1).sum()):,}".replace(",", "."), style=KPI_VALUE)]),
+                        html.Div(style=KPI_CARD, children=[html.Div("AUC Modelo", style=KPI_LABEL),
+                                                           html.Div(f"{AUC_SIMULADO}", style=KPI_VALUE)]),
+                    ]),
+                
+                # Mapa arriba
+                html.Div(style=CARD, children=[
+                    html.H4("Mapa de Probabilidades / Compensaciones", style={"marginTop": 0}),
+                    dcc.Graph(id="grafico_mapa", style={"height": "540px"})
+                ]),
+
+                # Gráfico debajo del mapa
+                html.Div(style=CARD, children=[
+                    html.H4("Conteo por PERIODO (YYYY-MM)", style={"marginTop": 0}),
+                    dcc.Graph(id="grafico_linea", style={"height": "360px"})
+                ]),
+            ])
+        ])
+    ]
 )
 
-
+# =========================
+# 6) CALLBACK
+# =========================
 @app.callback(
-    Output(component_id="plot_series", component_property="figure"),
-    [Input(component_id="datepicker-inicial", component_property="date"),
-    Input(component_id="dropdown-hora-inicial-hora", component_property="value"),
-    Input(component_id="slider-proyeccion", component_property="value")]
+    Output("grafico_linea", "figure"),
+    Output("grafico_mapa", "figure"),
+    Input("filtro_periodo", "value"),
+    Input("modo_comp", "value"),
+    Input("umbral", "value"),
+    Input("filtro_comp", "value")
 )
-def update_output_div(date, hour, proy):
+def actualizar(periodo_sel, modo_comp, thr, comp_sel):
+    d = df.copy()
 
-    if ((date is not None) & (hour is not None) & (proy is not None)):
-        hour = str(hour)
-        minute = str(0)
+    # Modo
+    if modo_comp == "pred":
+        d["COMP_PLOT"] = (d["PROB_PRED"] >= float(thr)).astype(int)
+    else:
+        d["COMP_PLOT"] = d["COMPENSADO"]
 
-        initial_date = date + " " + hour + ":" + minute
-        initial_date = pd.to_datetime(initial_date, format="%Y-%m-%d %H:%M")
+    # Filtros
+    if periodo_sel != "all":
+        d = d[d["PERIODO_STR"] == periodo_sel]
+    if comp_sel != "all":
+        d = d[d["COMP_PLOT"] == int(comp_sel)]
 
-        # Graficar
-        plot = plot_series(data, initial_date, int(proy))
-        return plot
+    # Línea (PERIODO_STR como categoría, no fecha)
+    d_line = make_df_mes(comp_sel, d)
+    fig_line = px.line(d_line, x="PERIODO_STR", y="conteo", markers=True, text="conteo",
+                       labels={"PERIODO_STR": "Periodo (YYYY-MM)", "conteo": "Cantidad"},
+                       title="Conteo por PERIODO (YYYY-MM)")
+    fig_line.update_traces(line=dict(width=3, color=PRIMARY), texttemplate="%{text:,}", textposition="top center")
+    fig_line.update_layout(
+        yaxis=dict(tickformat=","),
+        xaxis=dict(type="category", categoryorder="array", categoryarray=d_line["PERIODO_STR"].tolist()),
+        margin=dict(l=30, r=20, t=50, b=40)
+    )
 
+    # Mapa
+    if d.empty:
+        fig_map = px.scatter_mapbox(lat=[], lon=[])
+        fig_map.update_layout(mapbox_style="open-street-map", title="Mapa (sin datos)", margin=dict(l=10, r=10, t=50, b=10))
+    else:
+        if modo_comp == "pred":
+            fig_map = px.scatter_mapbox(
+                d, lat="LATITUD", lon="LONGITUD",
+                color="PROB_PRED", size="PROB_PRED",
+                hover_data=["NIU", "PERIODO_STR", "PROB_PRED"],
+                color_continuous_scale="YlOrRd",
+                zoom=9,
+                title=f"Predicción modelo (umbral={thr:.2f})"
+            )
+        else:
+            fig_map = px.scatter_mapbox(
+                d, lat="LATITUD", lon="LONGITUD",
+                color=d["COMP_PLOT"].astype(str),
+                hover_data=["NIU", "PERIODO_STR", "COMP_PLOT"],
+                zoom=9,
+                title=f"Etiqueta real — PERIODO={periodo_sel if periodo_sel!='all' else 'Todos'}"
+            )
 
-# Run the server
+        fig_map.update_layout(mapbox_style="open-street-map",
+                              mapbox_center={"lat": float(d["LATITUD"].mean()),
+                                             "lon": float(d["LONGITUD"].mean())},
+                              margin=dict(l=10, r=10, t=50, b=10))
+
+    return fig_line, fig_map
+
+# =========================
+# 7) RUN
+# =========================
 if __name__ == "__main__":
-    app.run(debug=True)
+    print("🚀 Dash corriendo en http://127.0.0.1:8050 (AUC=0.67, mapa arriba, filtro 'Compensado', DIUG activo)")
+    app.run(debug=False, host="127.0.0.1", port=8050)
